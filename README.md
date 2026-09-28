@@ -36,21 +36,23 @@ uv tool install --editable .
 
 ```bash
 # Setups and starts an OMP container inside a project directory
-enterpod --project_dir ~/project/my-project --template omp
+# cd project/my-project
+enterpod --template omp
 ```
 
 ### Customize
 
 ```bash
 # Generate Containerfile.dev from a template (does not build or start)
+# (Omitting --project_dir uses the current working directory)
 enterpod --copy --project_dir ~/project/my-project --template kilocode
 
-# Copies directories defined in image 
+# Copies directories defined in the image from $HOME to project/.container-home
 enterpod --setup --project_dir ~/project/my-project
 
 # Build and start the container
 enterpod --project_dir ~/project/my-project
-# Omitting --project_dir uses the current working directory
+
 ```
 
 ## Usage

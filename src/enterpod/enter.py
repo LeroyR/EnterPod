@@ -207,7 +207,7 @@ def main():
     # Context Shift execution path
     os.chdir(project_dir)
     project_name = os.path.basename(project_dir)
-    image_name = f"{project_name}-dev"
+    image_name = f"{project_name.lower()}-dev"
     container_name = project_name
 
     # --- Explicit Update handling logic ---
