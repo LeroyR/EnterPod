@@ -15,6 +15,11 @@ Comes pre-configured with your favorite AI coding agent or clean base images for
 - **Config copying**: Declarative host config copying via template markers
 - **Rootless Podman integration**: Uses `--userns=keep-id` for UID mapping; auto-starts the podman socket if missing
 
+## Prerequisites
+
+- [Podman](https://podman.io/docs/installation)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (recommended) or another Python package manager supporting PEP 518
+
 ## Installation
 
 ```bash
