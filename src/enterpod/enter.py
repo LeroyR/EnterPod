@@ -144,8 +144,8 @@ def main():
 
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Dev container launcher")
-    parser.add_argument("--copy", action="store_true", help="Generate Containerfile.dev only. Do not build or enter container.")
-    parser.add_argument("--setup", action="store_true", help="Copy configs to .container-home")
+    parser.add_argument("--init", action="store_true", help="Generate Containerfile.dev only. Do not build or enter container.")
+    parser.add_argument("--copy", action="store_true", help="Copy configs to .container-home")
     parser.add_argument("--force", action="store_true", help="Remove and recreate container")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild image from existing Containerfile.dev")
     parser.add_argument("--update", action="store_true", help="Overwrite local Containerfile.dev with latest template")
@@ -296,7 +296,7 @@ def main():
             with open(template_path, 'r') as in_f:
                 out_f.write(in_f.read())
 
-        if args.copy:
+        if args.init:
             print(f"Installed {containerfile_path}")
             print("\n⚠️  Read Containerfile.dev for additional setup steps  ⚠️\n")
             sys.exit(0)
@@ -351,7 +351,7 @@ def main():
 
     # --- Main Run Engine loop ---
     if container_exists:
-        if args.setup:
+        if args.copy:
             print("Copying host config dirs to container home")
             copy_dirs(container_home, user_maybe_copy)
 
@@ -372,8 +372,8 @@ def main():
         # Setup home environment
         os.makedirs(os.path.join(container_home, "bash"), exist_ok=True)
     
-        is_yes = args.setup
-        if not args.setup and ask_copy:
+        is_yes = args.copy
+        if not args.copy and ask_copy:
             home_dir = os.path.expanduser("~")
             # Find which dirs actually exist on the host
             existing_dirs = [d for d in user_maybe_copy if os.path.exists(os.path.join(home_dir, d))]

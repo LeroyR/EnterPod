@@ -1,9 +1,14 @@
 # EnterPod
 
-Spin up isolated, persistent development environments in seconds. 
-EnterPod creates rootless Podman containers with a project-specific home directory that survives restarts.
+EnterPod creates isolated, project-specific and persistent development environments using rootless Podman containers. Features isolated .container-home directories that survive rebuild, security-hardened containers, and pre-build templates for AI coding agents.
 
-Comes pre-configured with your favorite AI coding agent or clean base images for custom setups.
+## Quickstart
+
+```bash
+# Setup and start an oh-my-pi container inside a project directory
+# cd project/my-project
+enterpod --template omp
+```
 
 ## Features
 
@@ -32,23 +37,15 @@ uv tool install git+https://github.com/LeroyR/EnterPod.git@main
 uv tool install --editable .
 ```
 
-## Quickstart
-
-```bash
-# Setups and starts an OMP container inside a project directory
-# cd project/my-project
-enterpod --template omp
-```
-
-### Customize
+## Usage
 
 ```bash
 # Generate Containerfile.dev from a template (does not build or start)
 # (Omitting --project_dir uses the current working directory)
-enterpod --copy --project_dir ~/project/my-project --template kilocode
+enterpod --init --project_dir ~/project/my-project --template kilocode
 
 # Copies directories defined in the image from $HOME to project/.container-home
-enterpod --setup --project_dir ~/project/my-project
+enterpod --copy --project_dir ~/project/my-project
 
 # Build and start the container
 enterpod --project_dir ~/project/my-project
@@ -67,8 +64,8 @@ enterpod [OPTIONS]
 | --- | --- |
 | `--template <name>` | Template to use (default: `default`) |
 | `--project_dir <path>` | Directory to initialize (defaults to cwd) |
-| `--copy` | Generate `Containerfile.dev` only; do not build or start |
-| `--setup` | Copy host config dirs to `.container-home` |
+| `--init` | Generate `Containerfile.dev` only; do not build or start |
+| `--copy` | Copy host config dirs to `.container-home` |
 | `--rebuild` | Rebuild image from existing `Containerfile.dev` |
 | `--update` | Overwrite local `Containerfile.dev` with latest template, then rebuild |
 | `--force` | Remove and recreate the container |
@@ -146,7 +143,7 @@ enterpod --copy-dir ~/.npmrc --copy-dir ~/.gitconfig
 To force a re-copy of all declared directories:
 
 ```bash
-enterpod --setup
+enterpod --copy
 ```
 
 ### Environment variables
