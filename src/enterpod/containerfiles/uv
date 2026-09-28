@@ -1,0 +1,15 @@
+
+FROM ghcr.io/astral-sh/uv:alpine
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USER_NAME=dev
+RUN addgroup -g $GROUP_ID $USER_NAME  && \
+	adduser --disabled-password --gecos "" --ingroup "$USER_NAME" --no-create-home --uid "$USER_ID" $USER_NAME
+
+# =====================================================================================================================
+# Add additional developement tools below
+# =====================================================================================================================
+USER $USER_NAME
+WORKDIR /home/$USER_NAME
+CMD ["/bin/ash"]

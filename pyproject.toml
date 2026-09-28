@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enterpod"
+version = "0.1.0"
+description = "A lightweight development container launcher using Podman"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Leroy Rügemer", email = "lruegeme@techfak.uni-bielefeld.de" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = []
+
+[project.scripts]
+enterpod = "enterpod.enter:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+enterpod = ["containerfiles/*"]
+
+[tool.uv.extra-build-dependencies]
+    enterpod = ["pyparsing"]

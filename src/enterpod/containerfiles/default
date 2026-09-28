@@ -1,0 +1,33 @@
+# enterpod: copy-dirs
+# ^ Lists host directories to copy into container home on first run (--setup or prompt).
+#   Example: "# enterpod: copy-dirs .config/mytool .npmrc .gitconfig"
+#   Leave empty (as above) if no host config needs to be copied.
+
+# Base Image
+FROM fedora:latest
+# FROM debian:bookworm-slim
+
+# Always include the user part for permissions
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USER_NAME=dev
+RUN groupadd -g $GROUP_ID $USER_NAME 2>/dev/null || true && \
+    useradd -m -u $USER_ID -g $GROUP_ID -s /bin/bash $USER_NAME
+
+# Base tools
+RUN dnf install -y git curl wget make gcc gcc-c++ findutils tar gzip unzip \
+    which procps-ng htop tmux bash-completion && dnf clean all
+
+# =====================================================================================================================
+# Add additional developement tools below
+# =====================================================================================================================
+
+# Add uv
+#COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# =====================================================================================================================
+USER $USER_NAME
+WORKDIR /home/$USER_NAME
+
+# Change the start command here
+CMD ["/bin/bash"]

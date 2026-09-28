@@ -1,0 +1,8 @@
+.venv
+.vscode
+build/
+__pycache__
+*egg-info
+Containerfile.dev
+.container-home/
+.checksums

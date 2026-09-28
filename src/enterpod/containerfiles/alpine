@@ -1,0 +1,19 @@
+FROM alpine:3.14
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USER_NAME=dev
+RUN addgroup -g $GROUP_ID $USER_NAME  && \
+	adduser --disabled-password --gecos "" --ingroup "$USER_NAME" --no-create-home --uid "$USER_ID" $USER_NAME
+
+RUN apk add --no-cache git curl
+
+# =====================================================================================================================
+# Add additional developement tools below
+# =====================================================================================================================
+
+
+USER $USER_NAME
+WORKDIR /home/$USER_NAME
+# You can change the start command
+CMD ["/bin/ash"]

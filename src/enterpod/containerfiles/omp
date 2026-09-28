@@ -1,0 +1,48 @@
+# enterpod: copy-dirs .config/omp
+FROM debian:bookworm-slim
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USER_NAME=dev
+
+# Configure user matching the host UID/GID to maintain permissions
+RUN addgroup --gid $GROUP_ID $USER_NAME  && \
+    adduser --uid $USER_ID --ingroup $USER_NAME --shell /bin/bash $USER_NAME
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl git iptables openssh-client \
+      python3 python3-pip python3-venv ripgrep fd-find \
+ && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --break-system-packages --no-cache-dir ipykernel 
+
+ENV NPM_CONFIG_CACHE=~/.cache/npm
+ENV NPM_CONFIG_PREFIX=~/.cache/npm
+
+# Add bun
+COPY --from=docker.io/oven/bun:1.4.2 /usr/local/bin/bun /bin/
+RUN BUN_INSTALL_BIN=/usr/bin BUN_INSTALL_GLOBAL_DIR=/usr bun install -g @oh-my-pi/pi-coding-agent @oh-my-pi/pi-natives
+
+# The omp configs are stored in PROJECT/.container-home/.config/omp:
+# if you used omp before and want to carry over configs:
+#    cp ~/.omp/* into the PROJECT/.container-home/.config/omp/
+ENV PI_CONFIG_DIR=.config/omp
+
+# =====================================================================================================================
+# to use local llm easily set env var (and --force to restart container if started without previously)
+#   enterpod -e LLAMA_CPP_BASE_URL=URL --force
+# or add an ENV line to add permanently
+# ENV LLAMA_CPP_BASE_URL=http://localhost:8080
+#
+# Add additional developement tools below
+# =====================================================================================================================
+# Add uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+
+
+# entrypoint
+WORKDIR /home/$USER_NAME
+CMD ["omp"]

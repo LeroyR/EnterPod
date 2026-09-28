@@ -1,0 +1,23 @@
+# enterpod: copy-dirs .pi
+FROM fedora:latest
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USER_NAME=dev
+RUN dnf install -y git curl wget make gcc gcc-c++ findutils tar gzip unzip npm \
+    which procps-ng htop tmux bash-completion && dnf clean all
+RUN groupadd -g $GROUP_ID $USER_NAME 2>/dev/null || true && \
+    useradd -m -u $USER_ID -g $GROUP_ID -s /bin/bash $USER_NAME
+
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+ENV NPM_CONFIG_CACHE=~/.cache/npm
+ENV NPM_CONFIG_PREFIX=~/.cache/npm
+
+# =====================================================================================================================
+# Add additional developement tools below
+# =====================================================================================================================
+
+
+USER $USER_NAME
+WORKDIR /home/$USER_NAME
+CMD ["pi"]

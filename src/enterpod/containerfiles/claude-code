@@ -1,0 +1,41 @@
+# enterpod: copy-dirs .claude .config/anthropic
+FROM debian:bookworm-slim
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USER_NAME=dev
+
+# Install Node.js, npm, and certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    gnupg \
+    bash \
+    git \
+    openssh-client \
+    coreutils \
+    procps \
+    nodejs \
+    npm && \
+    rm -rf /var/lib/apt/lists/*
+
+# Configure user matching the host UID/GID to maintain permissions
+RUN addgroup --gid $GROUP_ID $USER_NAME  && \
+    adduser --uid $USER_ID --ingroup $USER_NAME --shell /bin/bash $USER_NAME
+
+# Install Claude Code CLI globally via npm
+RUN npm install -g @anthropic-ai/claude-code
+
+# ============================================================================
+# Make sure to copy the anthropic configs:
+#
+#       cp $HOME/.config/anthropic .container-home/.config/anthropic
+#       cp $HOME/.claude .container-home/.claude
+#
+#
+# Add additional developement tools below
+# =====================================================================================================================
+
+USER $USER_NAME
+WORKDIR /home/$USER_NAME
+CMD ["claude"]
