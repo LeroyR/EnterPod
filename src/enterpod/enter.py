@@ -401,7 +401,6 @@ def main():
 
         # Structural Volume Array definition
         optional_mounts = [
-            "-v", "/etc/tmux.conf:/etc/tmux.conf:ro",
             #"-v", f"{home_dir}/.config:/home/{username}/.config:ro",
         ]
         if os.path.exists(os.path.join(home_dir, ".tmux.conf")):
