@@ -90,6 +90,18 @@ def parse_copy_dirs(filepath):
                 return parts
     return []
 
+def parse_volumes(filepath):
+    """Parse '# enterpod: volumes <dir1> <dir2> ...' marker from Containerfile.dev."""
+    if not os.path.exists(filepath):
+        return []
+    with open(filepath, 'r') as f:
+        for line in f:
+            cleaned_line = line.strip()
+            if cleaned_line.startswith("# enterpod: volumes"):
+                parts = cleaned_line[len("# enterpod: volumes"):].split()
+                return parts
+    return []
+
 def get_container_running(name):
     res = subprocess.run(["podman", "inspect", "--format", "{{.State.Running}}", name], capture_output=True, text=True)
     return "true" in res.stdout.lower()
@@ -153,6 +165,7 @@ def main():
     parser.add_argument("--template", default="default", help=template_help_str)
     parser.add_argument("--project_dir", help="Initialize environment inside specific target path")
     parser.add_argument("-e", "--env", action="append", default=[], help="Pass custom environment variables (e.g., -e KEY=VAL)")
+    parser.add_argument("-v", "--volume", action="append", default=[], help="Pass custom RO mounts (e.g., -v /vol)")
     parser.add_argument("--copy-dir", action="append", default=[], help="Additional host directory to copy into container home (repeatable, e.g., --copy-dir ~/.npmrc)")
     args = parser.parse_args()
 
@@ -258,18 +271,31 @@ def main():
 
         if template_outdated or script_changed or env_changed or containerfile_changed:
             print("\n=== Changes detected since container was created ===")
+            need_ask = False
             if template_outdated:
                 print(f"  The master template ({template_name}) has updates.")
-                print("  -> Run: enterpod --update   (to pull the fresh template and rebuild)")
-                print("  -> Run: enterpod --rebuild  (to only rebuild your existing local edits)")
+                if not args.update:
+                    print("  -> Run: enterpod --update (to pull the fresh template and rebuild)")
             if script_changed:
-                print("  enterpod script logic has changed -> run: enterpod --force")
+                print("  enterpod script logic has changed")
+                if not args.force and not args.rebuild:
+                    need_ask = True
+                    print("  -> run: enterpod --force --rebuild (to remove and rebuild the container)")
             if env_changed:
-                print("  Environment variables (-e flags) have changed -> run: enterpod --force")
+                print("  Environment variables (-e flags) have changed")
+                if not args.force:
+                    need_ask = True
+                    print("  -> run: enterpod --force (to remove and recreate the container)")
             if containerfile_changed:
-                print("  Local Containerfile.dev has changed -> run: enterpod --rebuild")
+                print("  Local Containerfile.dev has changed")
+                if not args.rebuild:
+                    need_ask = True
+                    print("  -> Run: enterpod --rebuild  (to rebuild the container)")
             print("===================================================\n")
-            response = input("Would you like to continue anyway'? (y/N): ")
+            if need_ask:
+                response = input("Would you like to continue anyway'? (y/N): ")
+            else:
+                response = "yes"
             if response.strip().lower() not in ['y', 'yes']:
                 sys.exit(0)
 
@@ -352,8 +378,20 @@ def main():
     # --- Main Run Engine loop ---
     if container_exists:
         if args.copy:
-            print("Copying host config dirs to container home")
-            copy_dirs(container_home, user_maybe_copy)
+            home_dir = os.path.expanduser("~")
+            # Find which dirs actually exist on the host
+            existing_dirs = [d for d in user_maybe_copy if os.path.exists(os.path.join(home_dir, d))]
+            if existing_dirs:
+                print("Copy these host config dirs to container home?")
+                for d in existing_dirs:
+                    print(f"  ~/{d}")
+                    print("!!! This will overwrite current .container-home !!!")
+                is_yes = input("(y/n): ").strip().lower().startswith('y')
+            else:
+                print("No host config dirs found to copy.")
+            if is_yes:
+                copy_dirs(container_home, user_maybe_copy)
+                print(f"copied host config dirs to {container_home}")
 
         if get_container_running(container_name):
             print(f"Container '{container_name}' is running, attaching...")
@@ -367,13 +405,14 @@ def main():
         os.execvp("podman", ["podman", "exec", "-it", "-w", f"/home/{username}/{project_name}", container_name, cmd])
     else:
         print(f"Creating container environment: {container_name}")
-        ask_copy = not os.path.exists(os.path.join(project_dir, ".container-home"))
+        home_exists = os.path.exists(os.path.join(project_dir, ".container-home"))
 
         # Setup home environment
         os.makedirs(os.path.join(container_home, "bash"), exist_ok=True)
     
-        is_yes = args.copy
-        if not args.copy and ask_copy:
+        is_yes = args.copy # write on copy
+
+        if args.copy == home_exists: # ask
             home_dir = os.path.expanduser("~")
             # Find which dirs actually exist on the host
             existing_dirs = [d for d in user_maybe_copy if os.path.exists(os.path.join(home_dir, d))]
@@ -381,6 +420,8 @@ def main():
                 print("Copy these host config dirs to container home?")
                 for d in existing_dirs:
                     print(f"  ~/{d}")
+                if home_exists:
+                    print("!!! This will overwrite current .container-home !!!")
                 is_yes = input("(y/n): ").strip().lower().startswith('y')
             else:
                 print("No host config dirs found to copy.")
@@ -405,6 +446,11 @@ def main():
         ]
         if os.path.exists(os.path.join(home_dir, ".tmux.conf")):
             optional_mounts.extend(["-v", f"{home_dir}/.tmux.conf:/home/{username}/.tmux.conf:ro"])
+
+        template_volumes = parse_volumes(containerfile_path)
+        target_volumes = list(args.volume) + template_volumes
+        for vol in target_volumes:
+            optional_mounts.extend(["-v", f"{vol}:{vol}:ro"])
        
         # Write fresh dynamic execution tracking checksums
         write_checksums(checksums_file, template_path, script_path, args.env, containerfile_path)
@@ -424,6 +470,7 @@ def main():
             "-e", f"DOCKER_HOST=unix://{podman_sock}",
             "-v", f"{project_dir}/.container-home:/home/{username}",
             "-v", f"{project_dir}:/home/{username}/{project_name}",
+            "-v", f"/home/{username}/{project_name}/.container-home", # Hide .container-home
             "-v", f"{project_dir}/.container-home/bash:/home/{username}/.bash_history_dir",
             "-e", f"HISTFILE=/home/{username}/.bash_history_dir/.bash_history"
         ]
@@ -432,6 +479,7 @@ def main():
             for env_var in args.env:
                 create_cmd.extend(["-e", env_var])
 
+       
         create_cmd.extend(optional_mounts)
         create_cmd.extend(["-w", f"/home/{username}/{project_name}", image_name, "sleep", "infinity"])
 
