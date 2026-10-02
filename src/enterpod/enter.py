@@ -423,7 +423,7 @@ class EnterPod:
             if self.args.verbose:
                 build_cmd.insert(1, "--log-level=debug")
             run_with_spinner(
-                f"Building image '{self.image_name}' (evaluating cached layers)",
+                f"Building image '{self.image_name}'",
                 build_cmd,
                 self.args.verbose
             )

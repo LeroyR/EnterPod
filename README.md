@@ -13,7 +13,7 @@ enterpod --template omp
 ## Features
 
 - **Persistent project home**: Each project gets its own isolated home directory (`.container-home`) that persists across container restarts and rebuilds — your shell history, configs, and installed tools stay put
-- **Coding agent templates**: Quickstart with batteries-included templates for Kilo Code, Claude Code, Pi Coding Agent, OMP, or Pixi — or start from a clean base and customize
+- **Coding agent templates**: Quickstart with batteries-included templates for Kilo Code, Claude Code, Pi Coding Agent, or OMP — or start from a clean base and customize
 - **Smart layer caching**: Reuses Podman build cache when the image ID does not change; the running container is preserved on rebuild
 - **Drift detection**: Warns when the template, script, environment, or Containerfile.dev has changed since the container was created
 - **Security-hardened containers**: Runs with `--cap-drop=all`, `--security-opt no-new-privileges`, read-only root filesystem with tmpfs for `/tmp`
@@ -72,6 +72,8 @@ enterpod [OPTIONS]
 | `-e, --env <KEY=VAL>` | Pass custom environment variables (repeatable) |
 | `--copy-dir <path>` | Additional host directory to copy into container home (repeatable) |
 | `--verbose` | Verbose container builds |
+| `--version` | Print version and exit |
+| `-v, --volume <path>` | Mount host path read-only into container at same path (repeatable) |
 
 ### Templates
 
@@ -126,7 +128,7 @@ enterpod -e PYTHONPATH=/app -e NODE_ENV=development
 
 ### Config copying
 
-Host config directories are copied from `~` into `.container-home` on first setup. Which directories are copied is declared in the template via a marker comment:
+Host config directories are copied from your home into `.container-home` on first setup. Which directories are copied is declared in the template via a marker comment:
 
 ```
 # enterpod: copy-dirs .config/kilo .claude
@@ -154,6 +156,23 @@ enterpod --copy
 enterpod -e OPENAI_API_KEY=...
 ```
 
+### Custom read-only mounts
+
+Mount additional host directories into the container read-only at the same path. Useful for accessing host tools, shared data, or credential files:
+
+```bash
+# Mount a shared data directory and a config file
+enterpod -v /shared/data -v /etc/myapp/config.yaml
+```
+
+Templates can also declare default read-only mounts via a marker comment:
+
+```
+# enterpod: volumes /shared/data /etc/myapp
+```
+
+All mounted paths are read-only from the container's perspective.
+
 ## Container setup
 
 Each project gets its own container named after the project directory. The container runs with:
@@ -162,6 +181,7 @@ Each project gets its own container named after the project directory. The conta
 - `--network=host` — Shares host network namespace
 - `--cap-drop=all` — Drops all Linux capabilities
 - `--security-opt no-new-privileges` — Prevents privilege escalation
+- `--security-opt label=disable` — Disables SELinux labeling (required for rootless containers)
 - `--read-only` — Read-only root filesystem
 - `--tmpfs /tmp` and `--tmpfs /var/tmp` — Writable temporary directories
 
@@ -174,6 +194,7 @@ The following host directories are mounted into the container:
 | `$PROJECT_DIR/.container-home/bash` | `/home/$USER/.bash_history_dir` | read-write |
 | `~/.tmux.conf` (if exists) | `/home/$USER/.tmux.conf` | read-only |
 | Podman socket | `/run/user/$UID/podman/podman.sock` | read-write |
+
 
 ## Project config
 
