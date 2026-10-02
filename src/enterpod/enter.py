@@ -12,6 +12,7 @@ import json
 import shutil
 from dataclasses import dataclass, field
 
+
 def run_with_spinner(label, cmd_args, verbose=False):
     """Executes a command showing a spinner with context or streaming output directly."""
     if verbose:
@@ -22,10 +23,10 @@ def run_with_spinner(label, cmd_args, verbose=False):
     # simple terminal spinner implementation
     spin_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     print(f"  ⠋ {label}", end="\r", flush=True)
-    
+
     with tempfile.NamedTemporaryFile(mode='w+', delete=True) as log_file:
         process = subprocess.Popen(cmd_args, stdout=log_file, stderr=subprocess.STDOUT)
-        
+
         idx = 0
         while process.poll() is None:
             # Check for standard 'STEP X/Y:' line in log file for context updates
@@ -36,11 +37,11 @@ def run_with_spinner(label, cmd_args, verbose=False):
                 if "STEP " in line:
                     step_label = line.strip()[:60]
                     break
-            
+
             print(f"  {spin_chars[idx]} {step_label:<70}", end="\r", flush=True)
             idx = (idx + 1) % len(spin_chars)
             time.sleep(0.1)
-            
+
         if process.returncode == 0:
             print(f"  ✓ {label} — done." + " " * 30)
         else:
@@ -49,6 +50,7 @@ def run_with_spinner(label, cmd_args, verbose=False):
             log_file.seek(0)
             print("".join(log_file.readlines()[-20:]))
             sys.exit(1)
+
 
 @dataclass
 class ContainerfileInfo:
@@ -88,10 +90,12 @@ class ContainerfileInfo:
                         info.cmd = raw
         return info
 
+
 def check_podman_installed():
     if shutil.which("podman") is None:
         print("Error: podman is not installed.")
         sys.exit(1)
+
 
 def get_sha256(filepath):
     if not os.path.exists(filepath):
@@ -101,6 +105,7 @@ def get_sha256(filepath):
         for chunk in iter(lambda: f.read(65536), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
 
 def get_container_running(name):
     res = subprocess.run(["podman", "inspect", "--format", "{{.State.Running}}", name], capture_output=True, text=True)
@@ -113,10 +118,12 @@ def copy_dirs(container_home, home_dir, dirs):
         if os.path.exists(src):
             shutil.copytree(src, f"{container_home}/{userpath}", dirs_exist_ok=True)
 
+
 def exec_into_container(container_name, project_name, cf_info):
     """Replace process with interactive shell inside the container."""
     username = os.getlogin() if sys.platform != "win32" else "dev"
     os.execvp("podman", ["podman", "exec", "-it", "-w", f"/home/{username}/{project_name}", container_name, cf_info.cmd])
+
 
 def write_checksums(checksums_file, template_path, script_path, env_vars, containerfile_path):
     os.makedirs(os.path.dirname(checksums_file), exist_ok=True)
@@ -134,6 +141,7 @@ def write_checksums(checksums_file, template_path, script_path, env_vars, contai
             if key in existing:
                 f.write(f"{key}={existing[key]}\n")
 
+
 def read_checksums(checksums_file):
     result = {}
     if not os.path.exists(checksums_file):
@@ -146,15 +154,16 @@ def read_checksums(checksums_file):
                 result[key] = value
     return result
 
-def save_drift_pref(checksums_file, choice, state_hash):
-    """Save a remembered drift-continue choice keyed by the current change state."""
+
+def save_drift_pref(checksums_file, state_hash):
+    """Save a remembered drift-continue choice (always 'yes') keyed by state hash."""
     os.makedirs(os.path.dirname(checksums_file), exist_ok=True)
     prefs = read_checksums(checksums_file)
-    prefs["pref_continue"] = choice
+    prefs["pref_continue"] = "yes"
     prefs["pref_continue_hash"] = state_hash
     with open(checksums_file, 'w') as f:
-        for key, value in prefs.items():
-            f.write(f"{key}={value}\n")
+        f.writelines(f"{key}={value}\n" for key, value in prefs.items())
+
 
 def get_drift_pref(checksums_file, state_hash):
     """Return remembered drift choice if the state hash matches, else None."""
@@ -163,280 +172,279 @@ def get_drift_pref(checksums_file, state_hash):
         return prefs.get("pref_continue")
     return None
 
-def main():
-    check_podman_installed()
 
-    # Compute once, use throughout
-    real_home_dir = os.path.expanduser("~")
-    username = os.getlogin() if sys.platform != "win32" else "dev"
+class EnterPod:
+    def __init__(self):
+        self.real_home_dir = os.path.expanduser("~")
+        self.username = os.getlogin() if sys.platform != "win32" else "dev"
+        self.script_path = os.path.abspath(__file__)
+        self.project_dir = os.getcwd()
+        self.project_name = ""
+        self.image_name = ""
+        self.container_name = ""
+        self.containerfile_path = ""
+        self.checksums_file = ""
+        self.container_home = ""
+        self.template_dir = None
+        self.template_name = "default"
+        self.template_explicitly_set = False
+        self.template_path = ""
+        self.cf_info = None
 
-    available_templates = []
-    try:
-        template_dir = importlib.resources.files("enterpod") / "containerfiles"
-        if template_dir.is_dir():
-            # Filter out hidden files or subdirectories
-            available_templates = [
-                item.name for item in template_dir.iterdir() 
-                if item.is_file() and not item.name.startswith(".")
-            ]
-    except Exception as e:
-        print(f"Error loading internal template registry: {e}")
-        sys.exit(1)
-    # Join the templates for a clean help string formatting
-    template_help_str = f"Specific template filename to use (Available: {', '.join(available_templates)})"    
+        self.args = self.parse_args()
 
-    # --- Argument Parsing ---
-    parser = argparse.ArgumentParser(description="Dev container launcher")
-    parser.add_argument("--init", action="store_true", help="Generate Containerfile.dev only. Do not build or enter container.")
-    parser.add_argument("--copy", action="store_true", help="Copy configs to .container-home")
-    parser.add_argument("--force", action="store_true", help="Remove and recreate container")
-    parser.add_argument("--rebuild", action="store_true", help="Rebuild image from existing Containerfile.dev")
-    parser.add_argument("--update", action="store_true", help="Overwrite local Containerfile.dev with latest template")
-    parser.add_argument("--verbose", action="store_true", help="Show full build/create logging output")
-    parser.add_argument("--template", default="default", help=template_help_str)
-    parser.add_argument("--project_dir", help="Initialize environment inside specific target path")
-    parser.add_argument("-e", "--env", action="append", default=[], help="Pass custom environment variables (e.g., -e KEY=VAL)")
-    parser.add_argument("-v", "--volume", action="append", default=[], help="Pass custom RO mounts (e.g., -v /vol)")
-    parser.add_argument("--copy-dir", action="append", default=[], help="Additional host directory to copy into container home (repeatable, e.g., --copy-dir ~/.npmrc)")
-    args = parser.parse_args()
+    def list_templates(self):
+        try:
+            template_dir = importlib.resources.files("enterpod") / "containerfiles"
+            if template_dir.is_dir():
+                return template_dir, [
+                    item.name for item in template_dir.iterdir()
+                    if item.is_file() and not item.name.startswith(".")
+                ]
+        except Exception as e:
+            print(f"Error loading internal template registry: {e}")
+            sys.exit(1)
+        return None, []
 
-    # Rebuild cascade logic
-    if args.update:
-        args.rebuild = True
+    def parse_args(self):
+        template_dir, available_templates = self.list_templates()
+        self.template_dir = template_dir
+        template_help_str = f"Specific template filename to use (Available: {', '.join(available_templates)})"
 
-    script_path = os.path.abspath(__file__)
+        parser = argparse.ArgumentParser(description="Dev container launcher")
+        parser.add_argument("--init", action="store_true", help="Generate Containerfile.dev only. Do not build or enter container.")
+        parser.add_argument("--copy", action="store_true", help="Copy host configs into .container-home")
+        parser.add_argument("--force", action="store_true", help="Remove and recreate container")
+        parser.add_argument("--rebuild", action="store_true", help="Rebuild image from existing Containerfile.dev")
+        parser.add_argument("--update", action="store_true", help="Overwrite local Containerfile.dev with latest template")
+        parser.add_argument("--verbose", action="store_true", help="Show full build/create logging output")
+        parser.add_argument("--template", default=None, help=template_help_str)
+        parser.add_argument("--project_dir", help="Initialize environment inside specific target path")
+        parser.add_argument("-e", "--env", action="append", default=[], help="Pass custom environment variables (e.g., -e KEY=VAL)")
+        parser.add_argument("-v", "--volume", action="append", default=[], help="Pass custom RO mounts (e.g., -v /vol)")
+        parser.add_argument("--copy-dir", action="append", default=[], help="Additional host directory to copy into container home (repeatable, e.g., --copy-dir ~/.npmrc)")
+        args = parser.parse_args()
 
-    # Establish target execution directory structures
-    if args.project_dir:
-        os.makedirs(args.project_dir, exist_ok=True)
-        project_dir = os.path.abspath(args.project_dir)
-    else:
-        project_dir = os.getcwd()
-
-    containerfile_path = os.path.join(project_dir, "Containerfile.dev")
-    template_name = args.template
-
-    # Parse Containerfile.dev once, reuse throughout
-    cf_info = ContainerfileInfo.load(containerfile_path)
-
-    # --- Auto Detect Template Name if local configuration exists ---
-    if cf_info.template_source and not any('--template' in flag for flag in sys.argv):
-        template_name = cf_info.template_source
-
-    # Get Template
-    try:
-        template_path = os.path.abspath(str(template_dir / template_name))
-    except Exception as e:
-        print(f"Error resolving package template paths: {e}")
-        sys.exit(1)
-
-    # --- Mismatch Template Type Check ---
-    if any('--template' in flag for flag in sys.argv) and cf_info.template_source and template_name != cf_info.template_source:
-        print("⚠️  WARNING: Mismatch detected!")
-        print(f"  - Requested template via flag: '{template_name}'")
-        print(f"  - Existing Containerfile.dev template: '{cf_info.template_source}'")
-        print()
-        response = input("Do you want to overwrite Containerfile.dev with the fresh template and force an update? (y/N): ")
-        if response.strip().lower() in ['y', 'yes']:
-            args.update = True
+        # Force rebuild after update
+        if args.update:
             args.rebuild = True
+        return args
+
+    def setup_paths(self):
+        if self.args.project_dir:
+            os.makedirs(self.args.project_dir, exist_ok=True)
+            self.project_dir = os.path.abspath(self.args.project_dir)
         else:
-            print("Aborting execution.")
-            sys.exit(0)
+            self.project_dir = os.getcwd()
 
-    # Context Shift execution path
-    os.chdir(project_dir)
-    project_name = os.path.basename(project_dir)
-    image_name = f"{project_name.lower()}-dev"
-    container_name = project_name
+        self.containerfile_path = os.path.join(self.project_dir, "Containerfile.dev")
+        self.checksums_file = os.path.join(self.project_dir, ".container-home", ".checksums")
+        self.container_home = os.path.join(self.project_dir, ".container-home")
 
-    # --- Explicit Update handling logic ---
-    if args.update and os.path.exists(template_path):
-        print(f"Updating local Containerfile.dev from master template '{template_name}'...")
-        if os.path.exists(containerfile_path):
-            os.remove(containerfile_path)
+        # Context shift
+        os.chdir(self.project_dir)
+        self.project_name = os.path.basename(self.project_dir)
+        self.image_name = f"{self.project_name.lower()}-dev"
+        self.container_name = self.project_name
 
-    # --- Freshness Assertion logic (replaces check_for_changes) ---
-    checksums_file = os.path.join(project_dir, ".container-home", ".checksums")
-    
-    if os.path.exists(checksums_file) and os.path.exists(containerfile_path) and os.path.exists(template_path):
+        # Load Containerfile info
+        self.cf_info = ContainerfileInfo.load(self.containerfile_path)
+
+    def resolve_template(self):
+        self.template_explicitly_set = self.args.template is not None
+        self.template_name = self.args.template if self.args.template else "default"
+
+        # Auto-detect template from existing Containerfile
+        if self.cf_info.template_source and not self.template_explicitly_set:
+            self.template_name = self.cf_info.template_source
+
+        try:
+            self.template_path = os.path.abspath(str(self.template_dir / self.template_name))
+        except Exception as e:
+            print(f"Error resolving package template paths: {e}")
+            sys.exit(1)
+
+        # Mismatch check
+        if self.template_explicitly_set and self.cf_info.template_source and self.template_name != self.cf_info.template_source:
+            print("⚠️  WARNING: Mismatch detected!")
+            print(f"  - Requested template via flag: '{self.template_name}'")
+            print(f"  - Existing Containerfile.dev template: '{self.cf_info.template_source}'")
+            print()
+            response = input("Do you want to overwrite Containerfile.dev with the fresh template and force an update? (y/N): ")
+            if response.strip().lower() in ['y', 'yes']:
+                self.args.update = True
+                self.args.rebuild = True
+            else:
+                print("Aborting execution.")
+                sys.exit(0)
+        
+    def check_freshness(self):
+        """Detect drift and prompt user to continue."""
+        if not (os.path.exists(self.checksums_file) and os.path.exists(self.containerfile_path) and os.path.exists(self.template_path)):
+            return
+
         template_outdated = False
         script_changed = False
-        
+        env_changed = False
+        containerfile_changed = False
+
         # Check if master template is newer than when Containerfile.dev was generated
-        if cf_info.generated_on:
-            gen_epoch = cf_info.generated_on.timestamp()
-            master_epoch = os.path.getmtime(template_path)
+        if self.cf_info.generated_on:
+            gen_epoch = self.cf_info.generated_on.timestamp()
+            master_epoch = os.path.getmtime(self.template_path)
             if master_epoch > gen_epoch:
                 template_outdated = True
 
         # Parse checksums and detect changes
-        saved = read_checksums(checksums_file)
-        
+        saved = read_checksums(self.checksums_file)
+
         # Check script changes
-        current_script_hash = get_sha256(script_path)
+        current_script_hash = get_sha256(self.script_path)
         script_changed = saved.get("script") and current_script_hash != saved["script"]
 
         # Check -e flag changes
-        current_env_hash = hashlib.sha256(";".join(sorted(args.env)).encode()).hexdigest()
+        current_env_hash = hashlib.sha256(";".join(sorted(self.args.env)).encode()).hexdigest()
         env_changed = saved.get("env") and current_env_hash != saved["env"]
 
         # Check local Containerfile.dev changes
-        current_containerfile_hash = get_sha256(containerfile_path)
+        current_containerfile_hash = get_sha256(self.containerfile_path)
         containerfile_changed = saved.get("containerfile") and current_containerfile_hash != saved["containerfile"]
 
-        if template_outdated or script_changed or env_changed or containerfile_changed:
-            print("\n=== Changes detected since container was created ===")
-            need_ask = False
-            if template_outdated:
-                print(f"  The master template ({template_name}) has updates.")
-                if not args.update:
-                    print("  -> Run: enterpod --update (to pull the fresh template and rebuild)")
-            if script_changed:
-                print("  enterpod script logic has changed")
-                if not args.force and not args.rebuild:
-                    need_ask = True
-                    print("  -> run: enterpod --force --rebuild (to remove and rebuild the container)")
-            if env_changed:
-                print("  Environment variables (-e flags) have changed")
-                if not args.force:
-                    need_ask = True
-                    print("  -> run: enterpod --force (to remove and recreate the container)")
-            if containerfile_changed:
-                print("  Local Containerfile.dev has changed")
-                if not args.rebuild:
-                    need_ask = True
-                    print("  -> Run: enterpod --rebuild  (to rebuild the container)")
-            print("===================================================\n")
-            if need_ask:
-                # Compute a hash of the current change state for preference matching
-                state_hash = hashlib.sha256(f"{script_changed}|{env_changed}|{containerfile_changed}|{template_outdated}".encode()).hexdigest()
-                remembered = get_drift_pref(checksums_file, state_hash)
-                if remembered is not None:
-                    print(f"(Using remembered choice: {remembered})")
-                    response = remembered
-                else:
-                    response = input("Would you like to continue anyway? (y/N/r=remember yes): ")
-                    if response.strip().lower() == 'r':
-                        save_drift_pref(checksums_file, "yes", state_hash)
-                        response = "yes"
-            else:
-                response = "yes"
-            if response.strip().lower() not in ['y', 'yes']:
-                sys.exit(0)
+        if not (template_outdated or script_changed or env_changed or containerfile_changed):
+            return
 
-    # --- Initialization logic fallback ---
-    if not os.path.exists(containerfile_path):
-        if not args.project_dir:
+        print("\n=== Changes detected since container was created ===")
+        need_ask = False
+        if template_outdated:
+            print(f"  The master template ({self.template_name}) has updates.")
+            if not self.args.update:
+                print("  -> Run: enterpod --update (to pull the fresh template and rebuild)")
+        if script_changed:
+            print("  enterpod script logic has changed")
+            if not self.args.force and not self.args.rebuild:
+                need_ask = True
+                print("  -> run: enterpod --force --rebuild (to remove and rebuild the container)")
+        if env_changed:
+            print("  Environment variables (-e flags) have changed")
+            if not self.args.force:
+                need_ask = True
+                print("  -> run: enterpod --force (to remove and recreate the container)")
+        if containerfile_changed:
+            print("  Local Containerfile.dev has changed")
+            if not self.args.rebuild:
+                need_ask = True
+                print("  -> Run: enterpod --rebuild  (to rebuild the container)")
+        print("===================================================\n")
+
+        if not need_ask:
+            return
+
+        # Compute a hash of the current change state for preference matching
+        state_hash = hashlib.sha256(
+            f"{script_changed}|{env_changed}|{containerfile_changed}|{template_outdated}".encode()
+        ).hexdigest()
+        remembered = get_drift_pref(self.checksums_file, state_hash)
+        if remembered is not None:
+            print("Using remembered choice to continue anyway")
+            response = remembered
+        else:
+            response = input("Would you like to continue anyway? (y/N/r=remember yes): ")
+            if response.strip().lower() == 'r':
+                save_drift_pref(self.checksums_file, state_hash)
+                response = "yes"
+
+        if response.strip().lower() not in ['y', 'yes']:
+            sys.exit(0)
+
+    def initialize_containerfile(self):
+        """Generate Containerfile.dev from template if missing."""
+        if os.path.exists(self.containerfile_path):
+            return
+
+        if not self.args.project_dir and not self.args.update:
             print(f"No Containerfile.dev found in {os.getcwd()}")
-            response = input(f"Would you like to initialize Containerfile.dev here using template '{template_name}'? (y/N): ")
+            response = input(f"Would you like to initialize Containerfile.dev here using template '{self.template_name}'? (y/N): ")
             if response.strip().lower() not in ['y', 'yes']:
                 print("Initialization aborted.")
                 sys.exit(0)
 
-        if not os.path.exists(template_path):
-            print(f"Error: Template file not found at {template_path}")
+        if not os.path.exists(self.template_path):
+            print(f"Error: Template file not found at {self.template_path}")
             sys.exit(1)
 
-        print(f"Generating Containerfile.dev from template '{template_name}'...")
-        # Get RFC 2822 formatted date string directly
+        print(f"Generating Containerfile.dev from template '{self.template_name}'...")
         now_str = datetime.datetime.now().astimezone().strftime("%a, %d %b %Y %H:%M:%S %z")
-        with open(containerfile_path, 'w') as out_f:
+        with open(self.containerfile_path, 'w') as out_f:
             out_f.write("# Generated by enterpod: https://github.com/LeroyR/EnterPod\n")
-            out_f.write(f"# Template Source: {template_name}\n")
+            out_f.write(f"# Template Source: {self.template_name}\n")
             out_f.write(f"# Generated on: {now_str}\n\n")
-            with open(template_path, 'r') as in_f:
+            with open(self.template_path, 'r') as in_f:
                 out_f.write(in_f.read())
 
         # Reload now that the file exists
-        cf_info = ContainerfileInfo.load(containerfile_path)
+        self.cf_info = ContainerfileInfo.load(self.containerfile_path)
+        print(f"Installed {self.containerfile_path}")
+        print("\n⚠️  Read Containerfile.dev for additional setup steps  ⚠️\n")
 
-        if args.init:
-            print(f"Installed {containerfile_path}")
-            print("\n⚠️  Read Containerfile.dev for additional setup steps  ⚠️\n")
+        if self.args.init:
             sys.exit(0)
 
-    # --- Evaluated Layer Smart Build ---
-    image_changed = False
-    image_exists = subprocess.run(["podman", "image", "exists", image_name]).returncode == 0
-    
-    if not image_exists or args.rebuild:
-        old_id = subprocess.run(["podman", "images", "-q", image_name], capture_output=True, text=True).stdout.strip().split('\n')[0]
-        
-        uid = os.getuid()
-        gid = os.getgid()
+    def build_image(self):
+        """Build podman image, return True if image changed."""
+        image_changed = False
+        image_exists = subprocess.run(["podman", "image", "exists", self.image_name]).returncode == 0
 
-        build_cmd = [
-            "podman", "build",
-            "--build-arg", f"USER_ID={uid}",
-            "--build-arg", f"GROUP_ID={gid}",
-            "--build-arg", f"USER_NAME={username}",
-            "-t", image_name,
-            "-f", containerfile_path,
-            project_dir
-        ]
-        if args.verbose:
-            # Inserts "--log-level=debug" right after "build" (index 1)
-            build_cmd.insert(1, "--log-level=debug")
-        run_with_spinner(f"Building image '{image_name}' (evaluating cached layers)", build_cmd, args.verbose)
-        
-        new_id = subprocess.run(["podman", "images", "-q", image_name], capture_output=True, text=True).stdout.strip().split('\n')[0]
-        if old_id != new_id:
-            image_changed = True
+        if not image_exists or self.args.rebuild:
+            old_id = subprocess.run(
+                ["podman", "images", "-q", self.image_name], capture_output=True, text=True
+            ).stdout.strip().split('\n')[0]
 
-        # Update checksums after rebuild
-        write_checksums(checksums_file, template_path, script_path, args.env, containerfile_path)
+            uid = os.getuid()
+            gid = os.getgid()
 
-    # --- Dynamic Mount Constraint Enforcement Check ---
-    container_exists = subprocess.run(["podman", "container", "exists", container_name]).returncode == 0
+            build_cmd = [
+                "podman", "build",
+                "--build-arg", f"USER_ID={uid}",
+                "--build-arg", f"GROUP_ID={gid}",
+                "--build-arg", f"USER_NAME={self.username}",
+                "-t", self.image_name,
+                "-f", self.containerfile_path,
+                self.project_dir
+            ]
+            if self.args.verbose:
+                build_cmd.insert(1, "--log-level=debug")
+            run_with_spinner(
+                f"Building image '{self.image_name}' (evaluating cached layers)",
+                build_cmd,
+                self.args.verbose
+            )
 
-    # --- Teardown Logic execution ---
-    if (args.force or image_changed) and container_exists:
-        print("Tearing down old container environment (layers modified or force applied)...")
-        subprocess.run(["podman", "rm", "-f", container_name], capture_output=True)
-        container_exists = False
+            new_id = subprocess.run(
+                ["podman", "images", "-q", self.image_name], capture_output=True, text=True
+            ).stdout.strip().split('\n')[0]
+            if old_id != new_id:
+                image_changed = True
 
-    container_home = os.path.join(project_dir, ".container-home")
-    # Merge CLI-provided dirs with template dirs (CLI dirs first)
-    user_maybe_copy = list(args.copy_dir) + cf_info.copy_dirs
+            # Update checksums after rebuild
+            write_checksums(
+                self.checksums_file,
+                self.template_path,
+                self.script_path,
+                self.args.env,
+                self.containerfile_path
+            )
 
-    # --- Main Run Engine loop ---
-    if container_exists:
-        if args.copy:
-            # Find which dirs actually exist on the host
-            existing_dirs = [d for d in user_maybe_copy if os.path.exists(os.path.join(real_home_dir, d))]
-            if existing_dirs:
-                print("Copy these host config dirs to container home?")
-                for d in existing_dirs:
-                    print(f"  ~/{d}")
-                    print("!!! This will overwrite current .container-home !!!")
-                is_yes = input("(y/n): ").strip().lower().startswith('y')
-            else:
-                print("No host config dirs found to copy.")
-            if is_yes:
-                copy_dirs(container_home, real_home_dir, user_maybe_copy)
-                print(f"copied host config dirs to {container_home}")
+        return image_changed
 
-        if get_container_running(container_name):
-            print(f"Container '{container_name}' is running, attaching...")
-        else:
-            print(f"Container '{container_name}' exists but stopped, starting...")
-            subprocess.run(["podman", "start", container_name], check=True)
-        
-        # Attach interactive console session directly
-        exec_into_container(container_name, project_name, cf_info)
-    else:
-        print(f"Creating container environment: {container_name}")
-        home_exists = os.path.exists(os.path.join(project_dir, ".container-home"))
+    def handle_copy_prompt(self, user_maybe_copy, home_exists=False):
+        """Prompt and copy host config dirs."""
+        is_yes = self.args.copy
 
-        # Setup home environment
-        os.makedirs(os.path.join(container_home, "bash"), exist_ok=True)
-    
-        is_yes = args.copy # write on copy
-
-        if args.copy == home_exists: # ask
-            # Find which dirs actually exist on the host
-            existing_dirs = [d for d in user_maybe_copy if os.path.exists(os.path.join(real_home_dir, d))]
+        if self.args.copy == home_exists:
+            existing_dirs = [
+                d for d in user_maybe_copy
+                if os.path.exists(os.path.join(self.real_home_dir, d))
+            ]
             if existing_dirs:
                 print("Copy these host config dirs to container home?")
                 for d in existing_dirs:
@@ -446,9 +454,52 @@ def main():
                 is_yes = input("(y/n): ").strip().lower().startswith('y')
             else:
                 print("No host config dirs found to copy.")
+
         if is_yes:
-            copy_dirs(container_home, real_home_dir, user_maybe_copy)
-            print(f"copied host config dirs to {container_home}")
+            copy_dirs(self.container_home, self.real_home_dir, user_maybe_copy)
+            print(f"copied host config dirs to {self.container_home}")
+
+    def attach_to_container(self, container_exists):
+        """Attach to existing container."""
+        user_maybe_copy = list(self.args.copy_dir) + self.cf_info.copy_dirs
+
+        if container_exists:
+            if self.args.copy:
+                existing_dirs = [
+                    d for d in user_maybe_copy
+                    if os.path.exists(os.path.join(self.real_home_dir, d))
+                ]
+                if existing_dirs:
+                    print("Copy these host config dirs to container home?")
+                    for d in existing_dirs:
+                        print(f"  ~/{d}")
+                        print("!!! This will overwrite current .container-home !!!")
+                    is_yes = input("(y/n): ").strip().lower().startswith('y')
+                else:
+                    print("No host config dirs found to copy.")
+                    is_yes = False
+                if is_yes:
+                    copy_dirs(self.container_home, self.real_home_dir, user_maybe_copy)
+                    print(f"copied host config dirs to {self.container_home}")
+
+            if get_container_running(self.container_name):
+                print(f"Container '{self.container_name}' is running, attaching...")
+            else:
+                print(f"Container '{self.container_name}' exists but stopped, starting...")
+                subprocess.run(["podman", "start", self.container_name], check=True)
+
+            exec_into_container(self.container_name, self.project_name, self.cf_info)
+
+    def create_container(self):
+        """Create and start a new container."""
+        print(f"Creating container environment: {self.container_name}")
+        home_exists = os.path.exists(os.path.join(self.project_dir, ".container-home"))
+
+        # Setup home environment
+        os.makedirs(os.path.join(self.container_home, "bash"), exist_ok=True)
+
+        user_maybe_copy = list(self.args.copy_dir) + self.cf_info.copy_dirs
+        self.handle_copy_prompt(user_maybe_copy, home_exists)
 
         # Check local sockets
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
@@ -457,26 +508,30 @@ def main():
             print("Starting podman socket...")
             subprocess.run(["systemctl", "--user", "start", "podman.socket"], check=True)
 
-        os.makedirs(os.path.join(real_home_dir, ".config", "kilo"), exist_ok=True)
+        os.makedirs(os.path.join(self.real_home_dir, ".config", "kilo"), exist_ok=True)
 
         # Structural Volume Array definition
-        optional_mounts = [
-            #"-v", f"{home_dir}/.config:/home/{username}/.config:ro",
-        ]
-        if os.path.exists(os.path.join(real_home_dir, ".tmux.conf")):
-            optional_mounts.extend(["-v", f"{real_home_dir}/.tmux.conf:/home/{username}/.tmux.conf:ro"])
+        optional_mounts = []
+        if os.path.exists(os.path.join(self.real_home_dir, ".tmux.conf")):
+            optional_mounts.extend(["-v", f"{self.real_home_dir}/.tmux.conf:/home/{self.username}/.tmux.conf:ro"])
 
-        target_volumes = list(args.volume) + cf_info.volumes
+        target_volumes = list(self.args.volume) + self.cf_info.volumes
         for vol in target_volumes:
             optional_mounts.extend(["-v", f"{vol}:{vol}:ro"])
-       
+
         # Write fresh dynamic execution tracking checksums
-        write_checksums(checksums_file, template_path, script_path, args.env, containerfile_path)
+        write_checksums(
+            self.checksums_file,
+            self.template_path,
+            self.script_path,
+            self.args.env,
+            self.containerfile_path
+        )
 
         create_cmd = [
             "podman", "create",
-            "--name", container_name,
-            "--hostname", container_name,
+            "--name", self.container_name,
+            "--hostname", self.container_name,
             "--userns=keep-id",
             "--network=host",
             "--security-opt", "label=disable",
@@ -486,30 +541,60 @@ def main():
             "--tmpfs", "/tmp", "--tmpfs", "/var/tmp",
             "-v", f"{podman_sock}:{podman_sock}",
             "-e", f"DOCKER_HOST=unix://{podman_sock}",
-            "-v", f"{project_dir}/.container-home:/home/{username}",
-            "-v", f"{project_dir}:/home/{username}/{project_name}",
-            "-v", f"/home/{username}/{project_name}/.container-home", # Hide .container-home
-            "-v", f"{project_dir}/.container-home/bash:/home/{username}/.bash_history_dir",
-            "-e", f"HISTFILE=/home/{username}/.bash_history_dir/.bash_history"
+            "-v", f"{self.project_dir}/.container-home:/home/{self.username}",
+            "-v", f"{self.project_dir}:/home/{self.username}/{self.project_name}",
+            "-v", f"/home/{self.username}/{self.project_name}/.container-home",
+            "-v", f"{self.project_dir}/.container-home/bash:/home/{self.username}/.bash_history_dir",
+            "-e", f"HISTFILE=/home/{self.username}/.bash_history_dir/.bash_history"
         ]
-        # Inject the custom environment variables:
-        if args.env:
-            for env_var in args.env:
+        if self.args.env:
+            for env_var in self.args.env:
                 create_cmd.extend(["-e", env_var])
 
-       
         create_cmd.extend(optional_mounts)
-        create_cmd.extend(["-w", f"/home/{username}/{project_name}", image_name, "sleep", "infinity"])
+        create_cmd.extend(["-w", f"/home/{self.username}/{self.project_name}", self.image_name, "sleep", "infinity"])
 
-        run_with_spinner("Creating container (first run may take 30-60s for UID remapping)", create_cmd, args.verbose)
+        run_with_spinner(
+            "Creating container (first run may take 30-60s for UID remapping)",
+            create_cmd,
+            self.args.verbose
+        )
 
-        subprocess.run(["podman", "start", container_name], capture_output=True, check=True)
-        subprocess.run(["podman", "wait", "--condition=running", container_name], capture_output=True, check=True)
+        subprocess.run(["podman", "start", self.container_name], capture_output=True, check=True)
+        subprocess.run(["podman", "wait", "--condition=running", self.container_name], capture_output=True, check=True)
 
-        print("\n⚠️  Read Containerfile.dev for additional setup steps  ⚠️\n")
+        exec_into_container(self.container_name, self.project_name, self.cf_info)
 
-        # Replace execution frame context directly into container bash runtime shell instance
-        exec_into_container(container_name, project_name, cf_info)
+    def run(self):
+        check_podman_installed()
+        self.setup_paths()
+        self.resolve_template()
+
+        if self.args.update and os.path.exists(self.template_path):
+            print(f"Updating local Containerfile.dev from master template '{self.template_name}'...")
+            if os.path.exists(self.containerfile_path):
+                print("old file renamed to .old")
+                shutil.move(self.containerfile_path, f"{self.containerfile_path}.old")
+
+        self.check_freshness()
+        self.initialize_containerfile()
+
+        image_changed = self.build_image()
+        container_exists = subprocess.run(["podman", "container", "exists", self.container_name]).returncode == 0
+        
+        if (self.args.force or image_changed) and container_exists:
+            print("Tearing down old container environment (layers modified or force applied)...")
+            subprocess.run(["podman", "rm", "-f", self.container_name], capture_output=True)
+            container_exists = False
+
+        if container_exists:
+            self.attach_to_container(container_exists)
+        else:
+            self.create_container()
+
+
+def main():
+    EnterPod().run()
 
 if __name__ == "__main__":
     main()
