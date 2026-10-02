@@ -8,9 +8,17 @@ import subprocess
 import tempfile
 import time
 import importlib.resources
+from importlib.metadata import version as get_version, PackageNotFoundError
 import json
 import shutil
 from dataclasses import dataclass, field
+
+
+def get_enterpod_version():
+    try:
+        return get_version("enterpod")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def run_with_spinner(label, cmd_args, verbose=False):
@@ -212,6 +220,7 @@ class EnterPod:
         template_help_str = f"Specific template filename to use (Available: {', '.join(available_templates)})"
 
         parser = argparse.ArgumentParser(description="Dev container launcher")
+        parser.add_argument("--version", action="version", version=f"enterpod {get_enterpod_version()}")
         parser.add_argument("--init", action="store_true", help="Generate Containerfile.dev only. Do not build or enter container.")
         parser.add_argument("--copy", action="store_true", help="Copy host configs into .container-home")
         parser.add_argument("--force", action="store_true", help="Remove and recreate container")
