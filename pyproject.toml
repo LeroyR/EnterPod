@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "enterpod"
-version = "0.1.5"
+version = "0.1.6"
 description = "A lightweight development container launcher using Podman"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "Leroy Rügemer", email = "lruegeme@techfak.uni-bielefeld.de" }

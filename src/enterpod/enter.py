@@ -12,6 +12,7 @@ from importlib.metadata import version as get_version, PackageNotFoundError
 import json
 import shutil
 from dataclasses import dataclass, field
+import shlex
 
 
 def get_enterpod_version():
@@ -66,7 +67,7 @@ class ContainerfileInfo:
     path: str
     template_source: str = ""
     generated_on: datetime.datetime | None = None
-    cmd: str = "/bin/bash"
+    cmd: list[str] = field(default_factory=lambda: ["/bin/bash"])
     copy_dirs: list = field(default_factory=list)
     volumes: list = field(default_factory=list)
 
@@ -76,7 +77,8 @@ class ContainerfileInfo:
         if not os.path.exists(path):
             return info
         with open(path, 'r') as f:
-            for line in f:
+            lines = iter(f)
+            for line in lines:
                 line = line.strip()
                 if line.startswith("# Template Source:"):
                     info.template_source = line[len("# Template Source:"):].strip()
@@ -92,10 +94,23 @@ class ContainerfileInfo:
                     info.volumes = line[len("# enterpod: volumes"):].split()
                 elif line.upper().startswith("CMD "):
                     raw = line[4:].strip()
+                    # handle trailing backslash
+                    while raw.rstrip().endswith("\\"):
+                        raw = raw.rstrip()[:-1].rstrip()
+                        nxt = next(lines, None)
+                        if nxt is None:
+                            break
+                        raw += " " + nxt.strip()
+                    raw = raw.strip()
                     if raw.startswith("[") and raw.endswith("]"):
-                        info.cmd = " ".join(json.loads(raw))
+                        try:
+                            info.cmd = json.loads(raw)
+                        except json.JSONDecodeError:
+                            # Fallback if malformed
+                            info.cmd = shlex.split(raw)
                     else:
-                        info.cmd = raw
+                        # Shell form: splits string into a list of arguments safely
+                        info.cmd = shlex.split(raw)
         return info
 
 
@@ -117,20 +132,24 @@ def get_sha256(filepath):
 
 def get_container_running(name):
     res = subprocess.run(["podman", "inspect", "--format", "{{.State.Running}}", name], capture_output=True, text=True)
-    return "true" in res.stdout.lower()
-
+    return res.returncode == 0 and res.stdout.strip().lower() == "true"
 
 def copy_dirs(container_home, home_dir, dirs):
     for userpath in dirs:
         src = os.path.join(home_dir, userpath)
-        if os.path.exists(src):
-            shutil.copytree(src, f"{container_home}/{userpath}", dirs_exist_ok=True)
+        dest = f"{container_home}/{userpath}"
+        if os.path.isdir(src):
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+        elif os.path.isfile(src):
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(src, dest)
 
 
-def exec_into_container(container_name, project_name, cf_info):
+def exec_into_container(container_name, project_name, cf_info, cmd_override=None):
     """Replace process with interactive shell inside the container."""
     username = os.getlogin() if sys.platform != "win32" else "dev"
-    os.execvp("podman", ["podman", "exec", "-it", "-w", f"/home/{username}/{project_name}", container_name, cf_info.cmd])
+    cmd = cmd_override if cmd_override is not None else cf_info.cmd
+    os.execvp("podman", ["podman", "exec", "-it", "-w", f"/home/{username}/{project_name}", container_name, *cmd])
 
 
 def write_checksums(checksums_file, template_path, script_path, env_vars, containerfile_path):
@@ -194,6 +213,7 @@ class EnterPod:
         self.checksums_file = ""
         self.container_home = ""
         self.template_dir = None
+        self.available_templates = []
         self.template_name = "default"
         self.template_explicitly_set = False
         self.template_path = ""
@@ -217,6 +237,7 @@ class EnterPod:
     def parse_args(self):
         template_dir, available_templates = self.list_templates()
         self.template_dir = template_dir
+        self.available_templates = available_templates
         template_help_str = f"Specific template filename to use (Available: {', '.join(available_templates)})"
 
         parser = argparse.ArgumentParser(description="Dev container launcher")
@@ -228,10 +249,11 @@ class EnterPod:
         parser.add_argument("--update", action="store_true", help="Overwrite local Containerfile.dev with latest template")
         parser.add_argument("--verbose", action="store_true", help="Show full build/create logging output")
         parser.add_argument("--template", default=None, help=template_help_str)
-        parser.add_argument("--project_dir", help="Initialize environment inside specific target path")
+        parser.add_argument("--project-dir", help="Initialize environment inside specific target path")
         parser.add_argument("-e", "--env", action="append", default=[], help="Pass custom environment variables (e.g., -e KEY=VAL)")
         parser.add_argument("-v", "--volume", action="append", default=[], help="Pass custom RO mounts (e.g., -v /vol)")
-        parser.add_argument("--copy-dir", action="append", default=[], help="Additional host directory to copy into container home (repeatable, e.g., --copy-dir ~/.npmrc)")
+        parser.add_argument("-c", "--cmd", type=str, help="Override the container's CMD (e.g., --cmd \"bash -c 'echo hi'\")")
+        parser.add_argument("--copy-dir", action="append", default=[], help="Additional host directory to copy from user into container home (repeatable, e.g., --copy-dir .npmrc)")
         args = parser.parse_args()
 
         # Force rebuild after update
@@ -266,6 +288,11 @@ class EnterPod:
         # Auto-detect template from existing Containerfile
         if self.cf_info.template_source and not self.template_explicitly_set:
             self.template_name = self.cf_info.template_source
+
+        if self.template_name not in self.available_templates:
+            print(f"Error: template '{self.template_name}' not found.")
+            print(f"Available templates: {', '.join(self.available_templates)}")
+            sys.exit(1)
 
         try:
             self.template_path = os.path.abspath(str(self.template_dir / self.template_name))
@@ -324,21 +351,26 @@ class EnterPod:
 
         print("\n=== Changes detected since container was created ===")
         need_ask = False
+        drift_parts = []
         if template_outdated:
+            drift_parts.append(f"template:{get_sha256(self.template_path)}")
             print(f"  The master template ({self.template_name}) has updates.")
             if not self.args.update:
                 print("  -> Run: enterpod --update (to pull the fresh template and rebuild)")
         if script_changed:
+            drift_parts.append(f"script:{current_script_hash}")
             print("  enterpod script logic has changed")
             if not self.args.force and not self.args.rebuild:
                 need_ask = True
                 print("  -> run: enterpod --force --rebuild (to remove and rebuild the container)")
         if env_changed:
+            drift_parts.append(f"env:{current_env_hash}")
             print("  Environment variables (-e flags) have changed")
             if not self.args.force:
                 need_ask = True
                 print("  -> run: enterpod --force (to remove and recreate the container)")
         if containerfile_changed:
+            drift_parts.append(f"containerfile:{current_containerfile_hash}")
             print("  Local Containerfile.dev has changed")
             if not self.args.rebuild:
                 need_ask = True
@@ -349,9 +381,7 @@ class EnterPod:
             return
 
         # Compute a hash of the current change state for preference matching
-        state_hash = hashlib.sha256(
-            f"{script_changed}|{env_changed}|{containerfile_changed}|{template_outdated}".encode()
-        ).hexdigest()
+        state_hash = hashlib.sha256("|".join(sorted(drift_parts)).encode()).hexdigest()
         remembered = get_drift_pref(self.checksums_file, state_hash)
         if remembered is not None:
             print("Using remembered choice to continue anyway")
@@ -368,9 +398,12 @@ class EnterPod:
     def initialize_containerfile(self):
         """Generate Containerfile.dev from template if missing."""
         if os.path.exists(self.containerfile_path):
+            if self.args.init:
+                print(f"{self.containerfile_path} already exists.")
+                sys.exit(0)
             return
 
-        if not self.args.project_dir and not self.args.update:
+        if not self.args.project_dir and not self.args.update and not self.args.init:
             print(f"No Containerfile.dev found in {os.getcwd()}")
             response = input(f"Would you like to initialize Containerfile.dev here using template '{self.template_name}'? (y/N): ")
             if response.strip().lower() not in ['y', 'yes']:
@@ -468,7 +501,7 @@ class EnterPod:
             copy_dirs(self.container_home, self.real_home_dir, user_maybe_copy)
             print(f"copied host config dirs to {self.container_home}")
 
-    def attach_to_container(self, container_exists):
+    def attach_to_container(self, container_exists, cmd_override=None):
         """Attach to existing container."""
         user_maybe_copy = list(self.args.copy_dir) + self.cf_info.copy_dirs
 
@@ -482,7 +515,7 @@ class EnterPod:
                     print("Copy these host config dirs to container home?")
                     for d in existing_dirs:
                         print(f"  ~/{d}")
-                        print("!!! This will overwrite current .container-home !!!")
+                    print("!!! This will overwrite current .container-home !!!")
                     is_yes = input("(y/n): ").strip().lower().startswith('y')
                 else:
                     print("No host config dirs found to copy.")
@@ -497,9 +530,9 @@ class EnterPod:
                 print(f"Container '{self.container_name}' exists but stopped, starting...")
                 subprocess.run(["podman", "start", self.container_name], check=True)
 
-            exec_into_container(self.container_name, self.project_name, self.cf_info)
+            exec_into_container(self.container_name, self.project_name, self.cf_info, cmd_override)
 
-    def create_container(self):
+    def create_container(self, cmd_override=None):
         """Create and start a new container."""
         print(f"Creating container environment: {self.container_name}")
         home_exists = os.path.exists(os.path.join(self.project_dir, ".container-home"))
@@ -515,9 +548,11 @@ class EnterPod:
         podman_sock = os.path.join(runtime_dir, "podman/podman.sock")
         if not os.path.exists(podman_sock):
             print("Starting podman socket...")
-            subprocess.run(["systemctl", "--user", "start", "podman.socket"], check=True)
-
-        os.makedirs(os.path.join(self.real_home_dir, ".config", "kilo"), exist_ok=True)
+            try:
+                subprocess.run(["systemctl", "--user", "start", "podman.socket"], check=True)
+            except (FileNotFoundError, subprocess.CalledProcessError) as e:
+                print(f"Error: could not start podman.socket ({e}).")
+                sys.exit(1)
 
         # Structural Volume Array definition
         optional_mounts = []
@@ -552,7 +587,7 @@ class EnterPod:
             "-e", f"DOCKER_HOST=unix://{podman_sock}",
             "-v", f"{self.project_dir}/.container-home:/home/{self.username}",
             "-v", f"{self.project_dir}:/home/{self.username}/{self.project_name}",
-            "-v", f"/home/{self.username}/{self.project_name}/.container-home",
+            "-v", f"/home/{self.username}/{self.project_name}/.container-home", # hide .container home inside the container (mounted in ~)
             "-v", f"{self.project_dir}/.container-home/bash:/home/{self.username}/.bash_history_dir",
             "-e", f"HISTFILE=/home/{self.username}/.bash_history_dir/.bash_history"
         ]
@@ -570,19 +605,30 @@ class EnterPod:
         )
 
         subprocess.run(["podman", "start", self.container_name], capture_output=True, check=True)
-        subprocess.run(["podman", "wait", "--condition=running", self.container_name], capture_output=True, check=True)
+        #subprocess.run(["podman", "wait", "--condition=running", self.container_name], capture_output=True, check=True)
 
-        exec_into_container(self.container_name, self.project_name, self.cf_info)
+        exec_into_container(self.container_name, self.project_name, self.cf_info, cmd_override)
 
     def run(self):
         check_podman_installed()
         self.setup_paths()
         self.resolve_template()
 
+        cmd_override = None
+        if self.args.cmd is not None:
+            try:
+                cmd_override = shlex.split(self.args.cmd)
+            except ValueError as e:
+                print(f"Error: could not parse --cmd value {self.args.cmd!r}: {e}")
+                sys.exit(1)
+            if not cmd_override:
+                print("Error: --cmd resolved to an empty command.")
+                sys.exit(1)
+
         if self.args.update and os.path.exists(self.template_path):
             print(f"Updating local Containerfile.dev from master template '{self.template_name}'...")
             if os.path.exists(self.containerfile_path):
-                print("old file renamed to .old")
+                print("⚠️ old Containerfile.dev file moved to Containerfile.dev.old")
                 shutil.move(self.containerfile_path, f"{self.containerfile_path}.old")
 
         self.check_freshness()
@@ -597,9 +643,9 @@ class EnterPod:
             container_exists = False
 
         if container_exists:
-            self.attach_to_container(container_exists)
+            self.attach_to_container(container_exists, cmd_override)
         else:
-            self.create_container()
+            self.create_container(cmd_override)
 
 
 def main():

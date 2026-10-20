@@ -9,3 +9,4 @@ uv.lock
 Containerfile.dev
 .container-home/
 AGENTS.md
+TODO.md
