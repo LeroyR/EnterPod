@@ -7,12 +7,14 @@ import sys
 import subprocess
 import tempfile
 import time
+import collections
 import importlib.resources
 from importlib.metadata import version as get_version, PackageNotFoundError
 import json
 import shutil
 from dataclasses import dataclass, field
 import shlex
+import re
 
 
 def get_enterpod_version():
@@ -36,28 +38,28 @@ def run_with_spinner(label, cmd_args, verbose=False):
     with tempfile.NamedTemporaryFile(mode='w+', delete=True) as log_file:
         process = subprocess.Popen(cmd_args, stdout=log_file, stderr=subprocess.STDOUT)
 
+        tail = collections.deque(maxlen=20)
+        step_label = label
         idx = 0
         while process.poll() is None:
-            # Check for standard 'STEP X/Y:' line in log file for context updates
-            log_file.seek(0)
-            lines = log_file.readlines()
-            step_label = label
-            for line in reversed(lines):
+            for line in iter(log_file.readline, ''):
+                tail.append(line)
                 if "STEP " in line:
                     step_label = line.strip()[:60]
-                    break
-
             print(f"  {spin_chars[idx]} {step_label:<70}", end="\r", flush=True)
             idx = (idx + 1) % len(spin_chars)
             time.sleep(0.1)
+
+        # Drain anything written between the last poll and child exit.
+        for line in iter(log_file.readline, ''):
+            tail.append(line)
 
         if process.returncode == 0:
             print(f"  ✓ {label} — done." + " " * 30)
         else:
             print(f"  ✗ {label} — failed!" + " " * 30)
             print("\nLast 20 lines of output:")
-            log_file.seek(0)
-            print("".join(log_file.readlines()[-20:]))
+            print("".join(tail))
             sys.exit(1)
 
 
@@ -296,10 +298,11 @@ class EnterPod:
         # Context shift
         os.chdir(self.project_dir)
         self.project_name = os.path.basename(self.project_dir)
+        slug = re.sub(r"[^a-z0-9]+", "-", self.project_name.lower()).strip("-") or "project"
         real = os.path.realpath(self.project_dir)
         digest = hashlib.sha256(real.encode()).hexdigest()[:8]
-        self.image_name = f"{self.project_name.lower()}-dev-{digest}"
-        self.container_name = f"{self.project_name.lower()}-{digest}"
+        self.image_name = f"{slug}-dev-{digest}"
+        self.container_name = f"{slug}-{digest}"
 
         # Load Containerfile info
         self.cf_info = ContainerfileInfo.load(self.containerfile_path)
@@ -558,10 +561,16 @@ class EnterPod:
     def copy_home(self, is_new_container):
         """Copy host config files into .container-home (with prompting)."""
         user_maybe_copy = list(self.args.copy_dir) + self.cf_info.copy_dirs
-        existing_dirs = [
-            d for d in user_maybe_copy
-            if os.path.exists(os.path.join(self.real_home_dir, d))
-        ]
+
+        existing_dirs = []
+        for d in user_maybe_copy:
+            try:
+                target_path = (self.real_home_dir / d).resolve()
+                if target_path.is_relative_to(self.real_home_dir) and target_path.exists():
+                    existing_dirs.append(d)  # or append target_path / str(target_path)
+            except (ValueError, RuntimeError) as e:
+                continue
+
         missing_dirs = [
             d for d in user_maybe_copy
             if not os.path.exists(os.path.join(self.real_home_dir, d))
@@ -591,7 +600,7 @@ class EnterPod:
             should_copy = self._prompt_copy(existing_dirs, home_exists=True)
 
         if should_copy:
-            copy_dirs(self.container_home, self.real_home_dir, user_maybe_copy)
+            copy_dirs(self.container_home, self.real_home_dir, existing_dirs)
             print(f"copied host config dirs to {self.container_home}")
 
     def create_container(self):
@@ -689,7 +698,7 @@ class EnterPod:
         # If layers changed (or --force), tear down the stale container
         if (self.args.force or image_changed) and container_exists:
             print("Tearing down old container environment (layers modified or force applied)...")
-            subprocess.run(["podman", "rm", "-f", self.container_name], capture_output=True)
+            subprocess.run(["podman", "rm", "-v", "-t", "3", "-f", self.container_name], capture_output=True)
             container_exists = False
 
         # Populate ~ in the container

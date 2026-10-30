@@ -1,0 +1,24 @@
+# enterpod: copy-dirs .config/maki
+FROM docker.io/rust:1.99-alpine
+
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USER_NAME=dev
+RUN addgroup -g $GROUP_ID $USER_NAME  && \
+	adduser --disabled-password --gecos "" --ingroup "$USER_NAME" --no-create-home --uid "$USER_ID" $USER_NAME
+
+RUN apk add --no-cache git curl musl-dev pkgconfig openssl-dev g++
+RUN cargo install --root /usr --locked --git https://github.com/tontinton/maki.git maki
+
+
+# =====================================================================================================================
+# Add additional developement tools below
+# =====================================================================================================================
+#ENV LLAMA_CPP_HOST=<URL>
+#ENV LLAMA_CPP_API_KEY=<KEY>
+
+
+USER $USER_NAME
+WORKDIR /home/$USER_NAME
+# You can change the start command
+CMD ["maki"]
