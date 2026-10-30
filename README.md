@@ -73,8 +73,9 @@ enterpod [OPTIONS]
 | `--copy-dir <path>` | Additional host directory to copy into container home (repeatable) |
 | `--verbose` | Verbose container builds |
 | `--version` | Print version and exit |
-| `-v, --volume <path>` | Mount host path read-only into container at same path (repeatable) |
+| `-ro-mount <path>` | Mount host path read-only into container at same path (repeatable) |
 | `-c, --cmd <cmd>` | Override the container's CMD (e.g., --cmd \"bash -c 'echo hi'\") |
+| `--podman-socket` | Expose the host Podman API inside the container |
 
 ### Templates
 

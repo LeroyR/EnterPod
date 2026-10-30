@@ -1,6 +1,6 @@
 # enterpod: copy-dirs
 # ^ Lists host directories to copy into container home on first run (--setup or prompt).
-#   Example: "# enterpod: copy-dirs .config/mytool .npmrc .gitconfig"
+#   Example: "# enterpod: copy-dirs .config/mytool .local/bin .bashrc
 #   Leave empty (as above) if no host config needs to be copied.
 
 # Base Image

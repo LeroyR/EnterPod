@@ -251,15 +251,36 @@ class EnterPod:
         parser.add_argument("--template", default=None, help=template_help_str)
         parser.add_argument("--project-dir", help="Initialize environment inside specific target path")
         parser.add_argument("-e", "--env", action="append", default=[], help="Pass custom environment variables (e.g., -e KEY=VAL)")
-        parser.add_argument("-v", "--volume", action="append", default=[], help="Pass custom RO mounts (e.g., -v /vol)")
+        parser.add_argument("--ro-mount", action="append", default=[], help="Pass custom read only mounts (e.g., --ro-mount /vol)")
         parser.add_argument("-c", "--cmd", type=str, help="Override the container's CMD (e.g., --cmd \"bash -c 'echo hi'\")")
-        parser.add_argument("--copy-dir", action="append", default=[], help="Additional host directory to copy from user into container home (repeatable, e.g., --copy-dir .npmrc)")
+        parser.add_argument("--copy-dir", action="append", default=[], 
+                            help="Additional host directory to copy from user into container home (repeatable, e.g., --copy-dir .npmrc)")
+        parser.add_argument("--podman-socket", action="store_true", help="Expose the host Podman API inside the container")
         args = parser.parse_args()
+
+        self.cmd_override = None
+        if args.cmd:
+            try:
+                self.cmd_override = shlex.split(args.cmd)
+            except ValueError as e:
+                print(f"Error: could not parse --cmd value {args.cmd!r}: {e}")
+                sys.exit(1)
+            if not self.cmd_override:
+                print("Error: --cmd resolved to an empty command.")
+                sys.exit(1)
 
         # Force rebuild after update
         if args.update:
             args.rebuild = True
         return args
+
+    def _maybe_backup_template(self):
+        if not (self.args.update and os.path.exists(self.template_path)):
+            return
+        print(f"Updating local Containerfile.dev from master template '{self.template_name}'...")
+        if os.path.exists(self.containerfile_path):
+            print("⚠️ old Containerfile.dev file moved to Containerfile.dev.old")
+            shutil.move(self.containerfile_path, f"{self.containerfile_path}.old")
 
     def setup_paths(self):
         if self.args.project_dir:
@@ -275,8 +296,10 @@ class EnterPod:
         # Context shift
         os.chdir(self.project_dir)
         self.project_name = os.path.basename(self.project_dir)
-        self.image_name = f"{self.project_name.lower()}-dev"
-        self.container_name = self.project_name
+        real = os.path.realpath(self.project_dir)
+        digest = hashlib.sha256(real.encode()).hexdigest()[:8]
+        self.image_name = f"{self.project_name.lower()}-dev-{digest}"
+        self.container_name = f"{self.project_name.lower()}-{digest}"
 
         # Load Containerfile info
         self.cf_info = ContainerfileInfo.load(self.containerfile_path)
@@ -428,6 +451,8 @@ class EnterPod:
         print(f"Installed {self.containerfile_path}")
         print("\n⚠️  Read Containerfile.dev for additional setup steps  ⚠️\n")
 
+        self._ensure_gitignore()
+
         if self.args.init:
             sys.exit(0)
 
@@ -478,98 +503,134 @@ class EnterPod:
 
         return image_changed
 
-    def handle_copy_prompt(self, user_maybe_copy, home_exists=False):
-        """Prompt and copy host config dirs."""
-        is_yes = self.args.copy
+    def _prompt_copy(self, existing_dirs, home_exists):
+        print("Copy these host config dirs to container home?")
+        for d in existing_dirs:
+            print(f"  ~/{d}")
+        if home_exists:
+            print("!!! This will overwrite current .container-home !!!")
+        return input("(y/n): ").strip().lower().startswith('y')
 
-        if self.args.copy == home_exists:
-            existing_dirs = [
-                d for d in user_maybe_copy
-                if os.path.exists(os.path.join(self.real_home_dir, d))
-            ]
-            if existing_dirs:
-                print("Copy these host config dirs to container home?")
-                for d in existing_dirs:
-                    print(f"  ~/{d}")
-                if home_exists:
-                    print("!!! This will overwrite current .container-home !!!")
-                is_yes = input("(y/n): ").strip().lower().startswith('y')
-            else:
+    def _ensure_gitignore(self):
+        """Add .container-home to the project's .gitignore if not already present."""
+        gitignore_path = os.path.join(self.project_dir, ".gitignore")
+        entry_name = ".container-home"
+
+        def _normalize(line: str) -> str:
+            # Tolerate leading/trailing slashes and whitespace: "/.container-home/",
+            # ".container-home/", ".container-home", etc. all match.
+            return line.strip().lstrip("/").rstrip("/")
+
+        existing_lines = []
+        if os.path.exists(gitignore_path):
+            with open(gitignore_path, "r") as f:
+                existing_lines = f.readlines()
+
+        if any(_normalize(line) == entry_name for line in existing_lines):
+            return  # already ignored
+
+        try:
+            needs_separator = bool(existing_lines) and existing_lines[-1].strip() != ""
+            with open(gitignore_path, "a") as f:
+                if existing_lines and not existing_lines[-1].endswith("\n"):
+                    f.write("\n")
+                if needs_separator:
+                    f.write("\n")
+                f.write("# enterpod container home (added automatically)\n")
+                f.write(f"{entry_name}/\n")
+        except OSError as e:
+            print(f"⚠️  Could not update {gitignore_path}: {e}")
+            return
+
+        if existing_lines:
+            print(f"Added '{entry_name}/' to {gitignore_path}")
+        else:
+            print(f"Created {gitignore_path} with '{entry_name}/'")
+
+    def start_container(self):
+        """Start an existing (stopped) container."""
+        if get_container_running(self.container_name):
+            print(f"Container '{self.container_name}' is running, attaching...")
+        else:
+            print(f"Container '{self.container_name}' exists but stopped, starting...")
+            subprocess.run(["podman", "start", self.container_name], check=True)
+
+    def copy_home(self, is_new_container):
+        """Copy host config files into .container-home (with prompting)."""
+        user_maybe_copy = list(self.args.copy_dir) + self.cf_info.copy_dirs
+        existing_dirs = [
+            d for d in user_maybe_copy
+            if os.path.exists(os.path.join(self.real_home_dir, d))
+        ]
+        missing_dirs = [
+            d for d in user_maybe_copy
+            if not os.path.exists(os.path.join(self.real_home_dir, d))
+        ]
+        if missing_dirs:
+            print("⚠️  The Template wants to copy the following MISSING dirs")
+            for d in missing_dirs:
+                print(f"  ~/{d}")
+
+        if not existing_dirs:
+            if self.args.copy:
                 print("No host config dirs found to copy.")
+            return
 
-        if is_yes:
+        home_exists = os.path.exists(self.container_home)
+
+        if is_new_container:
+            # On creation: prompt if we can't infer intent from --copy vs home state
+            if self.args.copy == home_exists:
+                should_copy = self._prompt_copy(existing_dirs, home_exists)
+            else:
+                should_copy = self.args.copy
+        else:
+            # On attach: only copy if --copy was explicitly requested
+            if not self.args.copy:
+                return
+            should_copy = self._prompt_copy(existing_dirs, home_exists=True)
+
+        if should_copy:
             copy_dirs(self.container_home, self.real_home_dir, user_maybe_copy)
             print(f"copied host config dirs to {self.container_home}")
 
-    def attach_to_container(self, container_exists, cmd_override=None):
-        """Attach to existing container."""
-        user_maybe_copy = list(self.args.copy_dir) + self.cf_info.copy_dirs
-
-        if container_exists:
-            if self.args.copy:
-                existing_dirs = [
-                    d for d in user_maybe_copy
-                    if os.path.exists(os.path.join(self.real_home_dir, d))
-                ]
-                if existing_dirs:
-                    print("Copy these host config dirs to container home?")
-                    for d in existing_dirs:
-                        print(f"  ~/{d}")
-                    print("!!! This will overwrite current .container-home !!!")
-                    is_yes = input("(y/n): ").strip().lower().startswith('y')
-                else:
-                    print("No host config dirs found to copy.")
-                    is_yes = False
-                if is_yes:
-                    copy_dirs(self.container_home, self.real_home_dir, user_maybe_copy)
-                    print(f"copied host config dirs to {self.container_home}")
-
-            if get_container_running(self.container_name):
-                print(f"Container '{self.container_name}' is running, attaching...")
-            else:
-                print(f"Container '{self.container_name}' exists but stopped, starting...")
-                subprocess.run(["podman", "start", self.container_name], check=True)
-
-            exec_into_container(self.container_name, self.project_name, self.cf_info, cmd_override)
-
-    def create_container(self, cmd_override=None):
-        """Create and start a new container."""
+    def create_container(self):
+        """Create and start a brand-new container. No copy, no exec."""
         print(f"Creating container environment: {self.container_name}")
-        home_exists = os.path.exists(os.path.join(self.project_dir, ".container-home"))
-
-        # Setup home environment
         os.makedirs(os.path.join(self.container_home, "bash"), exist_ok=True)
 
-        user_maybe_copy = list(self.args.copy_dir) + self.cf_info.copy_dirs
-        self.handle_copy_prompt(user_maybe_copy, home_exists)
+        socket_args = []
+        if self.args.podman_socket:
+            # Ensure podman socket is up (needed by the DOCKER_HOST env we inject)
+            runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+            podman_sock = os.path.join(runtime_dir, "podman/podman.sock")
+            if not os.path.exists(podman_sock):
+                print("Starting podman socket...")
+                try:
+                    subprocess.run(["systemctl", "--user", "start", "podman.socket"], check=True)
+                except (FileNotFoundError, subprocess.CalledProcessError) as e:
+                    print(f"Error: could not start podman.socket ({e}).")
+                    sys.exit(1)
+            socket_args = [
+                "-v", f"{podman_sock}:{podman_sock}",
+                "-e", f"DOCKER_HOST=unix://{podman_sock}",
+            ]
 
-        # Check local sockets
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        podman_sock = os.path.join(runtime_dir, "podman/podman.sock")
-        if not os.path.exists(podman_sock):
-            print("Starting podman socket...")
-            try:
-                subprocess.run(["systemctl", "--user", "start", "podman.socket"], check=True)
-            except (FileNotFoundError, subprocess.CalledProcessError) as e:
-                print(f"Error: could not start podman.socket ({e}).")
-                sys.exit(1)
-
-        # Structural Volume Array definition
         optional_mounts = []
         if os.path.exists(os.path.join(self.real_home_dir, ".tmux.conf")):
-            optional_mounts.extend(["-v", f"{self.real_home_dir}/.tmux.conf:/home/{self.username}/.tmux.conf:ro"])
+            optional_mounts.extend([
+                "-v", f"{self.real_home_dir}/.tmux.conf:/home/{self.username}/.tmux.conf:ro"
+            ])
 
-        target_volumes = list(self.args.volume) + self.cf_info.volumes
-        for vol in target_volumes:
+        for vol in list(self.args.ro_mount) + self.cf_info.volumes:
             optional_mounts.extend(["-v", f"{vol}:{vol}:ro"])
 
-        # Write fresh dynamic execution tracking checksums
         write_checksums(
             self.checksums_file,
             self.template_path,
             self.script_path,
             self.args.env,
-            self.containerfile_path
+            self.containerfile_path,
         )
 
         create_cmd = [
@@ -583,69 +644,64 @@ class EnterPod:
             "--cap-drop=all",
             "--read-only",
             "--tmpfs", "/tmp", "--tmpfs", "/var/tmp",
-            "-v", f"{podman_sock}:{podman_sock}",
-            "-e", f"DOCKER_HOST=unix://{podman_sock}",
             "-v", f"{self.project_dir}/.container-home:/home/{self.username}",
             "-v", f"{self.project_dir}:/home/{self.username}/{self.project_name}",
-            "-v", f"/home/{self.username}/{self.project_name}/.container-home", # hide .container home inside the container (mounted in ~)
+            "-v", f"/home/{self.username}/{self.project_name}/.container-home", # hide .container-home inside the container (already mounted in ~)
             "-v", f"{self.project_dir}/.container-home/bash:/home/{self.username}/.bash_history_dir",
-            "-e", f"HISTFILE=/home/{self.username}/.bash_history_dir/.bash_history"
+            "-e", f"HISTFILE=/home/{self.username}/.bash_history_dir/.bash_history",
         ]
-        if self.args.env:
-            for env_var in self.args.env:
-                create_cmd.extend(["-e", env_var])
+        create_cmd.extend(socket_args)
+
+        for env_var in self.args.env:
+            create_cmd.extend(["-e", env_var])
 
         create_cmd.extend(optional_mounts)
-        create_cmd.extend(["-w", f"/home/{self.username}/{self.project_name}", self.image_name, "sleep", "infinity"])
+        create_cmd.extend([
+            "-w", f"/home/{self.username}/{self.project_name}",
+            self.image_name, "sleep", "infinity",
+        ])
 
         run_with_spinner(
             "Creating container (first run may take 30-60s for UID remapping)",
             create_cmd,
-            self.args.verbose
+            self.args.verbose,
         )
-
         subprocess.run(["podman", "start", self.container_name], capture_output=True, check=True)
-        #subprocess.run(["podman", "wait", "--condition=running", self.container_name], capture_output=True, check=True)
 
-        exec_into_container(self.container_name, self.project_name, self.cf_info, cmd_override)
+    def exec_into(self, cmd_override=None):
+        """Replace this process with an interactive shell inside the container."""
+        exec_into_container(
+            self.container_name, self.project_name, self.cf_info, cmd_override
+        )
 
     def run(self):
         check_podman_installed()
         self.setup_paths()
         self.resolve_template()
 
-        cmd_override = None
-        if self.args.cmd is not None:
-            try:
-                cmd_override = shlex.split(self.args.cmd)
-            except ValueError as e:
-                print(f"Error: could not parse --cmd value {self.args.cmd!r}: {e}")
-                sys.exit(1)
-            if not cmd_override:
-                print("Error: --cmd resolved to an empty command.")
-                sys.exit(1)
-
-        if self.args.update and os.path.exists(self.template_path):
-            print(f"Updating local Containerfile.dev from master template '{self.template_name}'...")
-            if os.path.exists(self.containerfile_path):
-                print("⚠️ old Containerfile.dev file moved to Containerfile.dev.old")
-                shutil.move(self.containerfile_path, f"{self.containerfile_path}.old")
-
+        self._maybe_backup_template()
         self.check_freshness()
         self.initialize_containerfile()
 
         image_changed = self.build_image()
         container_exists = subprocess.run(["podman", "container", "exists", self.container_name]).returncode == 0
-        
+
+        # If layers changed (or --force), tear down the stale container
         if (self.args.force or image_changed) and container_exists:
             print("Tearing down old container environment (layers modified or force applied)...")
             subprocess.run(["podman", "rm", "-f", self.container_name], capture_output=True)
             container_exists = False
 
+        # Populate ~ in the container
+        self.copy_home(is_new_container=not container_exists)
+
         if container_exists:
-            self.attach_to_container(container_exists, cmd_override)
+            self.start_container()
         else:
-            self.create_container(cmd_override)
+            self.create_container()
+
+        # hand the terminal over to the container
+        self.exec_into(self.cmd_override)
 
 
 def main():
