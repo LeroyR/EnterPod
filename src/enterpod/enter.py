@@ -15,6 +15,7 @@ import shutil
 from dataclasses import dataclass, field
 import shlex
 import re
+from pathlib import Path
 
 
 def get_enterpod_version():
@@ -565,7 +566,7 @@ class EnterPod:
         existing_dirs = []
         for d in user_maybe_copy:
             try:
-                target_path = (self.real_home_dir / d).resolve()
+                target_path = (Path(self.real_home_dir) / d).resolve()
                 if target_path.is_relative_to(self.real_home_dir) and target_path.exists():
                     existing_dirs.append(d)  # or append target_path / str(target_path)
             except (ValueError, RuntimeError) as e:
